@@ -1,0 +1,40 @@
+sequenceDiagram
+    autonumber
+    participant U as Browser
+    participant API as Score Service
+    participant DB as Postgres
+    participant R as Redis
+
+    Note over U,R: Page load
+    U->>API: GET /leaderboard
+    API->>R: read top N
+    R-->>API: top N
+    API-->>U: 200 { top }
+    U->>API: GET /leaderboard/stream (SSE — stays open)
+
+    Note over U,R: Start action
+    U->>API: POST /score-actions { actionId }
+    API->>API: auth + rate-limit
+    API->>DB: lookup delta for actionId
+    API->>API: sign actionToken (id, delta, exp)
+    API-->>U: 200 { actionToken }
+
+    Note over U,R: Complete action
+    U->>API: POST /score-events { actionToken }
+    API->>API: auth + rate-limit + verify token
+    rect rgb(240,240,240)
+    Note right of API: Atomic redemption (one tx)
+    API->>DB: INSERT score_events (token id UNIQUE)
+    alt replay (token id seen)
+        API-->>U: 409 replay_detected
+    else fresh
+        API->>DB: UPDATE users.score += delta
+        API->>R: ZINCRBY + PUBLISH leaderboard.changed
+        API-->>U: 200 { newScore, rank }
+    end
+    end
+
+    Note over U,R: Live fan-out
+    R-->>API: leaderboard.changed (sub)
+    API->>R: re-read top N
+    API-->>U: event: leaderboard.updated
